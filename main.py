@@ -5,6 +5,7 @@ from flask_sqlalchemy import SQLAlchemy
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 from sqlalchemy import String, Integer, DateTime
 from flask import Flask
+from telebot.asyncio_helper import ApiTelegramException
 from telebot.types import InlineKeyboardButton, InlineKeyboardMarkup , ReplyKeyboardRemove
 from datetime import datetime, timezone, timedelta
 from apscheduler.schedulers.background import BackgroundScheduler
@@ -99,6 +100,28 @@ def contact(message):
         bot.send_message(message.chat.id, "Please reach out through the the below methods.",
                          reply_markup=reach_owner)
 
+# stop timer command
+@bot.message_handler(commands=['stoptimer'])
+def stop_timer(message):
+    if message.chat.type not in ['group', 'supergroup']:
+        bot.send_message(message.chat.id, 'This command only works in groups.')
+        return
+
+    if not is_user_admin(message.chat.id, message.from_user.id):
+        bot.send_message(message.chat.id, 'Only group admins can do this.')
+        return
+
+    with app.app_context():
+        setting = db.session.execute(db.select(GroupSetting).filter_by(chat_id=message.chat.id)).scalar()
+
+        if not setting:
+            bot.send_message(message.chat.id, 'No custom timer is set - will use group auto delete setting (if any).')
+            return
+
+        db.session.delete(setting)
+        db.session.commit()
+    bot.reply_to(message, 'Custom timer ⌛️ removed.')
+
 # @bot.message_handler(commands=['clear'])
 # def clear(message):
 #     bot.send_message(message.chat.id, 'Keyboard removed', reply_markup=ReplyKeyboardRemove())
@@ -128,6 +151,21 @@ def click_button(call):
             bot.register_next_step_handler(msg, set_timer, call.from_user.id, time())
         else:
             bot.answer_callback_query(call.id, text='Only Admins can set this', show_alert=True)
+
+def effective_timer(chat_id):
+    with app.app_context():
+        setting = db.session.execute(db.select(GroupSetting)).filter_by(chat_id=chat_id).scalar()
+
+        # converting the timer to seconds because telegram auto delete time is in seconds
+        if setting:
+            return setting.timer * 86400
+
+        try:
+            chat = bot.get_chat(chat_id)
+        except ApiTelegramException:
+            return None
+
+        return chat.message_auto_delete_time or None
 
 
 # Set timer -- the timer carries the amount of days an input stays in the database
@@ -188,15 +226,17 @@ def reply_text(message):
             db.session.add(new_project)
             db.session.commit()
 
-    print('report saved')
-
 def cleanup_expired_projects():
     with app.app_context():
-        settings = db.session.execute(db.select(GroupSetting)).scalars().all()
+        chat_ids = db.session.execute(db.select(Projects.chat_id)).distinct().scalars().all()
 
-        for setting in settings:
-            time_up = datetime.now(timezone.utc) - timedelta(days=setting.timer)
-            expired = db.session.execute(db.select(Projects).filter(Projects.chat_id == setting.chat_id, Projects.submitted_at < time_up)).scalars().all()
+        for chat_id in chat_ids:
+            seconds = effective_timer(chat_id)
+
+            if not seconds:
+                continue
+            time_up = datetime.now(timezone.utc) - timedelta(seconds=seconds)
+            expired = db.session.execute(db.select(Projects).filter(Projects.chat_id == chat_id, Projects.submitted_at < time_up)).scalars().all()
 
             for group in expired:
                 db.session.delete(group)
