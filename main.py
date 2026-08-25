@@ -1,11 +1,11 @@
 import os
-from load_dotenv import load_dotenv
+from dotenv import load_dotenv
 import telebot
 from flask_sqlalchemy import SQLAlchemy
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 from sqlalchemy import String, Integer, DateTime
 from flask import Flask
-from telebot.asyncio_helper import ApiTelegramException
+from telebot.apihelper import ApiTelegramException
 from telebot.types import InlineKeyboardButton, InlineKeyboardMarkup , ReplyKeyboardRemove
 from datetime import datetime, timezone, timedelta
 from apscheduler.schedulers.background import BackgroundScheduler
@@ -22,7 +22,7 @@ app = Flask(__name__)
 class Base(DeclarativeBase):
     pass
 
-app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///projects.db'
+app.config['SQLALCHEMY_DATABASE_URI'] = os.getenv("DATABASE_URL", 'sqlite:///projects.db')
 db = SQLAlchemy(model_class=Base)
 db.init_app(app)
 
@@ -77,17 +77,6 @@ def welcome(message):
     else:
         bot.send_message(message.chat.id, welcome_text)
 
-# Help command
-@bot.message_handler(commands=['help'])
-def help_user(message):
-    if message.chat.type in ['group', 'supergroup']:
-        if is_user_admin(message.chat.id, message.from_user.id):
-            bot.send_message(message.chat.id, "If you need any help, please contact our support with the /contact prompt.")
-        return
-    else:
-        bot.send_message(message.chat.id, "If you need any help, please contact our support with the /contact prompt.")
-
-
 # Contact Command
 @bot.message_handler(commands=['contact'])
 def contact(message):
@@ -122,6 +111,34 @@ def stop_timer(message):
         db.session.commit()
     bot.reply_to(message, 'Custom timer ⌛️ removed.')
 
+@bot.message_handler(commands=['unclaim'])
+def unclaim_group(message):
+
+    if message.chat.type not in ['group', 'supergroup']:
+        bot.send_message(message.chat.id, 'This command only works in groups.')
+        return
+
+    args = message.text.split()
+
+    if len(args) < 2:
+        bot.reply_to(message, '⚠️ Usage: /unclaim <link>')
+        return
+
+    link_to_delete = args[1]
+    with app.app_context():
+        project = db.session.execute(db.select(Projects).filter_by(group_link=link_to_delete)).scalar()
+        if not project:
+            bot.reply_to(message, "⚠️ Couldn't find link in the database" )
+            return
+
+        if project.user_id != message.from_user.id:
+            bot.reply_to(message, '⚠️ Only the person who reported this can unclaim it')
+            return
+
+        db.session.delete(project)
+        db.session.commit()
+
+
 # @bot.message_handler(commands=['clear'])
 # def clear(message):
 #     bot.send_message(message.chat.id, 'Keyboard removed', reply_markup=ReplyKeyboardRemove())
@@ -154,7 +171,7 @@ def click_button(call):
 
 def effective_timer(chat_id):
     with app.app_context():
-        setting = db.session.execute(db.select(GroupSetting)).filter_by(chat_id=chat_id).scalar()
+        setting = db.session.execute(db.select(GroupSetting).filter_by(chat_id=chat_id)).scalar()
 
         # converting the timer to seconds because telegram auto delete time is in seconds
         if setting:
@@ -187,6 +204,7 @@ def set_timer(message, admin_id, started_at):
         timer_days = int(message.text)
     except ValueError:
         bot.send_message(message.chat.id, " ⚠️ That's not a valid number, please try again.")
+        bot.register_next_step_handler(message, set_timer, admin_id, started_at)
         return
 
     with app.app_context():
@@ -204,31 +222,36 @@ def set_timer(message, admin_id, started_at):
 
 @bot.message_handler(func=lambda message: message.chat.type in ['group', 'supergroup'])
 def reply_text(message):
-
     with app.app_context():
-        result = db.session.execute(db.select(Projects))
-        all_links = result.scalars().all()
 
         g_link, name = get_msg_details(message.text.split())
+        if not name:
+            bot.reply_to(message, '⚠️ Please include a name along with the link.')
+            return
 
-        for link in all_links:
-            if g_link == link.group_link:
-                user_info = bot.get_chat(link.user_id)
-                bot.reply_to(message, text=f'Group already reported by {user_info.first_name}')
+        existing = db.session.execute(db.select(Projects).filter_by(group_link = g_link)).scalar()
+
+        if existing:
+            if existing.user_id != message.from_user.id:
+                user_info = bot.get_chat(existing.user_id)
+                display_name = f'@{user_info.username}' if user_info.username else user_info.first_name
+                bot.reply_to(message, text=f'Group already reported by {display_name}')
+                return
+            else:
+                existing.group_name = name
+                existing.submitted_at = datetime.now(timezone.utc)
+                db.session.commit()
                 return
 
         if 't.me/' in message.text or 'https://' in message.text or 'x.com/' in message.text:
             g_link, name = get_msg_details(message.text.split())
-            if not name:
-                bot.reply_to(message, '⚠️ Please include a name along with the link.')
-                return
             new_project = Projects(user_id=message.from_user.id, chat_id=message.chat.id, group_name=name, group_link=g_link)
             db.session.add(new_project)
             db.session.commit()
 
 def cleanup_expired_projects():
     with app.app_context():
-        chat_ids = db.session.execute(db.select(Projects.chat_id)).distinct().scalars().all()
+        chat_ids = db.session.execute(db.select(Projects.chat_id).distinct()).scalars().all()
 
         for chat_id in chat_ids:
             seconds = effective_timer(chat_id)
