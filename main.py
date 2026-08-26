@@ -28,7 +28,7 @@ db.init_app(app)
 
 class Projects(db.Model):
     id: Mapped[int] = mapped_column(primary_key=True)
-    user_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    user_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
     chat_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
     group_name: Mapped[str] = mapped_column(String)
     group_link: Mapped[str] = mapped_column(String)
