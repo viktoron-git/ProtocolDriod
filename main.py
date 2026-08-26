@@ -126,7 +126,7 @@ def unclaim_group(message):
 
     link_to_delete = args[1]
     with app.app_context():
-        project = db.session.execute(db.select(Projects).filter_by(group_link=link_to_delete)).scalar()
+        project = db.session.execute(db.select(Projects).filter_by(chat_id = message.chat.id, group_link=link_to_delete)).scalar()
         if not project:
             bot.reply_to(message, "⚠️ Couldn't find link in the database" )
             return
@@ -134,9 +134,10 @@ def unclaim_group(message):
         if project.user_id != message.from_user.id:
             bot.reply_to(message, '⚠️ Only the person who reported this can unclaim it')
             return
-
+        user_info = bot.get_chat(message.from_user.id)
         db.session.delete(project)
         db.session.commit()
+    bot.reply_to(message, f"{user_info.first_name} unclaimed {project.group_name}")
 
 
 # @bot.message_handler(commands=['clear'])
@@ -229,7 +230,7 @@ def reply_text(message):
             bot.reply_to(message, '⚠️ Please include a name along with the link.')
             return
 
-        existing = db.session.execute(db.select(Projects).filter_by(group_link = g_link)).scalar()
+        existing = db.session.execute(db.select(Projects).filter_by(chat_id = message.chat.id, group_link = g_link)).scalar()
 
         if existing:
             if existing.user_id != message.from_user.id:
@@ -244,7 +245,6 @@ def reply_text(message):
                 return
 
         if 't.me/' in message.text or 'https://' in message.text or 'x.com/' in message.text:
-            g_link, name = get_msg_details(message.text.split())
             new_project = Projects(user_id=message.from_user.id, chat_id=message.chat.id, group_name=name, group_link=g_link)
             db.session.add(new_project)
             db.session.commit()
