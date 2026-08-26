@@ -3,7 +3,7 @@ from dotenv import load_dotenv
 import telebot
 from flask_sqlalchemy import SQLAlchemy
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
-from sqlalchemy import String, Integer, DateTime
+from sqlalchemy import String, Integer, DateTime, BigInteger
 from flask import Flask
 from telebot.apihelper import ApiTelegramException
 from telebot.types import InlineKeyboardButton, InlineKeyboardMarkup , ReplyKeyboardRemove
@@ -29,14 +29,14 @@ db.init_app(app)
 class Projects(db.Model):
     id: Mapped[int] = mapped_column(primary_key=True)
     user_id: Mapped[int] = mapped_column(Integer, nullable=False)
-    chat_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    chat_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
     group_name: Mapped[str] = mapped_column(String)
     group_link: Mapped[str] = mapped_column(String)
     submitted_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc))
 
 class GroupSetting(db.Model):
     id: Mapped[int] = mapped_column(primary_key=True)
-    chat_id: Mapped[int] = mapped_column(Integer, unique=True, nullable=False)
+    chat_id: Mapped[int] = mapped_column(BigInteger, unique=True, nullable=False)
     timer: Mapped[int] = mapped_column(Integer, nullable=False)
 
 with app.app_context():
