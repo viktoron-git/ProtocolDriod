@@ -1,4 +1,5 @@
 import os
+from functools import wraps
 from dotenv import load_dotenv
 import telebot
 from flask_sqlalchemy import SQLAlchemy
@@ -12,8 +13,9 @@ from apscheduler.schedulers.background import BackgroundScheduler
 from time import time
 
 load_dotenv()
-TOKEN = os.getenv('TOKEN')
+TOKEN = os.getenv('TEST_TOKEN')
 bot = telebot.TeleBot(token=TOKEN)
+ADMIN_ID = os.getenv('ADMIN_ID')
 
 app = Flask(__name__)
 
@@ -37,7 +39,9 @@ class Projects(db.Model):
 class GroupSetting(db.Model):
     id: Mapped[int] = mapped_column(primary_key=True)
     chat_id: Mapped[int] = mapped_column(BigInteger, unique=True, nullable=False)
-    timer: Mapped[int] = mapped_column(Integer, nullable=False)
+    timer: Mapped[int] = mapped_column(Integer, nullable=True)
+    daily_limit: Mapped[int] = mapped_column(Integer, nullable=True)
+    total_limit: Mapped[int] = mapped_column(Integer, nullable=True)
 
 with app.app_context():
     db.create_all()
@@ -55,6 +59,15 @@ def get_msg_details(message):
 
     g_name = " ".join(name_parts) if name_parts else None
     return g_link, g_name
+
+def admin_required(func):
+    @wraps(func)
+    def wrapper(message, *args, **kwargs):
+        if not is_user_admin(message.chat.id, message.from_user.id):
+            bot.reply_to(message, "Only group admins can do this")
+            return
+        return func(message, *args, **kwargs)
+    return wrapper
 
 # Inline keyboard buttons
 reach_owner = InlineKeyboardMarkup(row_width=2)
@@ -107,7 +120,7 @@ def stop_timer(message):
             bot.send_message(message.chat.id, 'No custom timer is set - will use group auto delete setting (if any).')
             return
 
-        db.session.delete(setting)
+        setting.timer = None
         db.session.commit()
     bot.reply_to(message, 'Custom timer ⌛️ removed.')
 
@@ -135,9 +148,98 @@ def unclaim_group(message):
             bot.reply_to(message, '⚠️ Only the person who reported this can unclaim it')
             return
         user_info = bot.get_chat(message.from_user.id)
+        group_name = project.group_name
         db.session.delete(project)
         db.session.commit()
-    bot.reply_to(message, f"{user_info.first_name} unclaimed {project.group_name}")
+    bot.reply_to(message, f"{user_info.first_name} unclaimed {group_name}")
+
+@bot.message_handler(commands=['setlimit'])
+def set_limit(message):
+    if message.chat.type not in ['group', 'supergroup']:
+        bot.send_message(message.chat.id, 'This command only works in groups.')
+        return
+
+    if not is_user_admin(message.chat.id, message.from_user.id):
+        bot.send_message(message.chat.id, 'Only group admins can do this.')
+        return
+
+    args = message.text.split()
+
+    if len(args) < 2:
+        bot.reply_to(message, '⚠️ Usage: /setlimit <number>')
+        return
+
+    try:
+        limit = int(args[1])
+    except ValueError:
+        bot.reply_to(message, "⚠️ Please provide a valid number.")
+        return
+
+    with app.app_context():
+        setting = db.session.execute(db.select(GroupSetting).filter_by(chat_id=message.chat.id)).scalar()
+
+        if setting:
+            setting.total_limit = limit
+        else:
+            db.session.add(GroupSetting(chat_id=message.chat.id, total_limit=limit))
+        db.session.commit()
+
+    bot.reply_to(message, f"Total report limit set to {limit} per scout.")
+
+@bot.message_handler(commands=['setdailylimit'])
+def set_daily_limit(message):
+    if message.chat.type not in ['group', 'supergroup']:
+        bot.send_message(message.chat.id, 'This command only works in groups.')
+        return
+
+    if not is_user_admin(message.chat.id, message.from_user.id):
+        bot.send_message(message.chat.id, 'Only group admins can do this.')
+        return
+
+    args = message.text.split()
+
+    if len(args) < 2:
+        bot.reply_to(message, '⚠️ Usage: /setdailylimit <number>')
+        return
+
+    try:
+        limit = int(args[1])
+    except ValueError:
+        bot.reply_to(message, "⚠️ Please provide a valid number.")
+        return
+
+    with app.app_context():
+        setting = db.session.execute(db.select(GroupSetting).filter_by(chat_id=message.chat.id)).scalar()
+
+        if setting:
+            setting.daily_limit = limit
+        else:
+            db.session.add(GroupSetting(chat_id=message.chat.id, daily_limit=limit))
+        db.session.commit()
+
+    bot.reply_to(message, f"Daily report limit set to {limit} per scout.")
+
+@bot.message_handler(commands=['rmlimits'])
+def remove_group_limits(message):
+    if message.chat.type not in ['group', 'supergroup']:
+        bot.send_message(message.chat.id, 'This command only works in groups.')
+        return
+
+    if not is_user_admin(message.chat.id, message.from_user.id):
+        bot.send_message(message.chat.id, 'Only group admins can do this.')
+        return
+
+    with app.app_context():
+        setting = db.session.execute(db.select(GroupSetting).filter_by(chat_id=message.chat.id)).scalar()
+
+        if not setting or (setting.total_limit is None and setting.daily_limit is None):
+            bot.send_message(message.chat.id, 'No group limits set.')
+            return
+
+        setting.daily_limit = None
+        setting.total_limit = None
+        db.session.commit()
+    bot.reply_to(message, 'All group limits removed. ')
 
 
 # @bot.message_handler(commands=['clear'])
@@ -175,7 +277,7 @@ def effective_timer(chat_id):
         setting = db.session.execute(db.select(GroupSetting).filter_by(chat_id=chat_id)).scalar()
 
         # converting the timer to seconds because telegram auto delete time is in seconds
-        if setting:
+        if setting and setting.timer is not None:
             return setting.timer * 86400
 
         try:
@@ -185,6 +287,39 @@ def effective_timer(chat_id):
 
         return chat.message_auto_delete_time or None
 
+def report_count(chat_id, user_id):
+    new_day = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+    current_count = db.session.execute(db.select(db.func.count()).select_from(Projects)
+                                    .filter(
+        Projects.user_id == user_id,
+        Projects.chat_id == chat_id,
+        Projects.submitted_at >= new_day
+    )).scalar()
+
+    return current_count
+
+def daily_limit(chat_id):
+    with app.app_context():
+        setting = db.session.execute(db.select(GroupSetting).filter_by(chat_id=chat_id)).scalar()
+
+        if setting and setting.daily_limit is not None:
+            return setting.daily_limit
+
+        return None
+
+def get_total_limit(chat_id):
+    with app.app_context():
+        setting = db.session.execute(db.select(GroupSetting).filter_by(chat_id=chat_id)).scalar()
+        if setting and setting.total_limit is not None:
+            return setting.total_limit
+
+        return None
+
+def total_claimed(chat_id, user_id):
+    with app.app_context():
+        return db.session.execute(db.select(db.func.count()).select_from(Projects).filter_by(
+            chat_id=chat_id, user_id=user_id
+        )).scalar()
 
 # Set timer -- the timer carries the amount of days an input stays in the database
 def set_timer(message, admin_id, started_at):
@@ -245,6 +380,32 @@ def reply_text(message):
                 return
 
         if 't.me/' in message.text or 'https://' in message.text or 'x.com/' in message.text:
+            limit_per_day = daily_limit(message.chat.id)
+
+            if limit_per_day is not None:
+                if report_count(chat_id=message.chat.id, user_id=message.from_user.id) >= limit_per_day:
+                    bot.reply_to(message, f"⚠️ You've reached your daily limit. Try again tomorrow.")
+                    if ADMIN_ID:
+                        display_name = f"@{message.from_user.username}" if message.from_user.username else message.from_user.first_name
+                        try:
+                            bot.send_message(ADMIN_ID, f"{display_name} has exceeded {limit_per_day} on {message.chat.title}")
+                        except ApiTelegramException:
+                            pass
+                    return
+
+            total_limit = get_total_limit(message.chat.id)
+            if total_limit is not None:
+                total_claim = total_claimed(message.chat.id, message.from_user.id)
+                if total_claim >= total_limit:
+                    bot.reply_to(message, f"You've exceeded your limits")
+                    if ADMIN_ID:
+                        display_name = f"@{message.from_user.username}" if message.from_user.username else message.from_user.first_name
+                        try:
+                            bot.send_message(ADMIN_ID, f"{display_name} has exceeded {total_limit} on {message.chat.title}")
+                        except ApiTelegramException:
+                            pass
+                    return
+
             new_project = Projects(user_id=message.from_user.id, chat_id=message.chat.id, group_name=name, group_link=g_link)
             db.session.add(new_project)
             db.session.commit()
