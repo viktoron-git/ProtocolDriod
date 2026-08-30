@@ -7,7 +7,7 @@ from sqlalchemy.orm import DeclarativeBase
 
 
 load_dotenv()
-TOKEN = os.getenv('TEST_TOKEN')
+TOKEN = os.getenv('TOKEN')
 bot = telebot.TeleBot(token=TOKEN)
 ADMIN_ID = os.getenv('ADMIN_ID')
 
