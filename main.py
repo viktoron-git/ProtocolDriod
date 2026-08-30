@@ -240,7 +240,7 @@ def reply_text(message):
 
             if limit_per_day is not None:
                 if daily_usage_count(chat_id=message.chat.id, user_id=message.from_user.id) >= limit_per_day:
-                    bot.reply_to(message, f"⚠️ You've reached your daily limit. Try again tomorrow or unclaim your previous links.")
+                    #bot.reply_to(message, f"⚠️ You've reached your daily limit. Try again tomorrow or unclaim your previous links.")
                     if ADMIN_ID:
                         display_name = f"@{message.from_user.username}" if message.from_user.username else message.from_user.first_name
                         try:
