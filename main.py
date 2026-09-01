@@ -185,6 +185,23 @@ def remove_group_limits(message):
         db.session.commit()
     bot.reply_to(message, 'All group limits removed. ')
 
+@bot.message_handler(commands=['show'])
+def show_links(message):
+    if message.chat.type not in ['group', 'supergroup']:
+        bot.send_message(message.chat.id, 'This command only works in groups.')
+        return
+
+    with app.app_context():
+        projects = db.session.execute(db.select(Projects).filter_by(chat_id=message.chat.id, user_id=message.from_user.id)).scalars().all()
+
+    if not projects:
+        bot.reply_to(message, "You haven't reported any links in this group yet")
+        return
+
+    lines = [f"{i}. {r.group_name} — {r.group_link}" for i, r in enumerate(projects, start=1)]
+    text = "📋 Your reported links:\n\n" + "\n".join(lines)
+    bot.reply_to(message, text)
+
 
 # @bot.message_handler(commands=['clear'])
 # def clear(message):
