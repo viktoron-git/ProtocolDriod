@@ -5,7 +5,7 @@ from time import time
 from datetime import datetime, timezone
 from extensions import app, db, bot, ADMIN_ID
 from models import GroupSetting, Projects, DailyUsage
-from botfunctions import daily_usage_count, increase_daily, decrease_daily, total_claimed, daily_limit, get_msg_details, cleanup_expired_projects, get_total_limit, is_user_admin, set_timer
+from botfunctions import daily_usage_count, increase_daily, decrease_daily, total_claimed, daily_limit, get_msg_details, cleanup_expired_projects, get_total_limit, is_user_admin, set_timer, delete_link
 
 
 with app.app_context():
@@ -77,18 +77,19 @@ def unclaim_group(message):
     args = message.text.split()
 
     if len(args) < 2:
-        bot.reply_to(message, '⚠️ Usage: /unclaim <link>')
+        bot.reply_to(message, "What group link do you want to unclaim? ")
+        bot.register_next_step_handler(message, delete_link)
         return
 
     link_to_delete = args[1]
     with app.app_context():
         project = db.session.execute(db.select(Projects).filter_by(chat_id = message.chat.id, group_link=link_to_delete)).scalar()
         if not project:
-            bot.reply_to(message, "⚠️ Couldn't find link in the database" )
+            bot.reply_to(message, "⚠️ Couldn't find link" )
             return
 
         if project.user_id != message.from_user.id:
-            bot.reply_to(message, '⚠️ Only the person who reported this can unclaim it')
+            bot.reply_to(message, '⚠️ Only who reported this can unclaim it')
             return
         user_info = bot.get_chat(message.from_user.id)
         group_name = project.group_name
