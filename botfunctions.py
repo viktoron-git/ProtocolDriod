@@ -162,3 +162,22 @@ def cleanup_expired_projects():
                 db.session.delete(group)
 
         db.session.commit()
+
+def delete_link(message):
+    group_link = message.text
+    with app.app_context():
+        project = db.session.execute(
+            db.select(Projects).filter_by(chat_id=message.chat.id, group_link=group_link)).scalar()
+        if not project:
+            bot.reply_to(message, "⚠️ Couldn't find link.")
+            return
+
+        if project.user_id != message.from_user.id:
+            bot.reply_to(message, '⚠️ Only who reported this can unclaim it')
+            return
+        user_info = bot.get_chat(message.from_user.id)
+        group_name = project.group_name
+        db.session.delete(project)
+        db.session.commit()
+        decrease_daily(chat_id=message.chat.id, user_id=message.from_user.id)
+    bot.reply_to(message, f"{user_info.first_name} unclaimed {group_name}")
