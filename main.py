@@ -243,8 +243,11 @@ def reply_text(message):
 
         if existing:
             if existing.user_id != message.from_user.id:
-                user_info = bot.get_chat(existing.user_id)
-                display_name = f'@{user_info.username}' if user_info.username else user_info.first_name
+                try:
+                    user_info = bot.get_chat(existing.user_id)
+                    display_name = f'@{user_info.username}' if user_info.username else user_info.first_name
+                except ApiTelegramException:
+                    display_name = 'another scout'
                 bot.reply_to(message, text=f'Group already reported by {display_name}')
                 return
             else:
