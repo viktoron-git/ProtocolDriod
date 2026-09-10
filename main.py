@@ -295,6 +295,6 @@ schedular.add_job(cleanup_expired_projects, 'interval', hours=24)
 schedular.start()
 
 
-bot.polling()
+bot.infinity_polling(timeout=20, long_polling_timeout=20)
 
 
