@@ -441,7 +441,7 @@ def reply_text(message):
 
 backfill_normalized_urls()
 schedular = BackgroundScheduler()
-schedular.add_job(cleanup_expired_projects, 'interval', hours=24)
+schedular.add_job(cleanup_expired_projects, 'interval', hours=6)
 schedular.add_job(post_daily_stats, 'cron', hour=23, minute=59, timezone=TIMEZONE, misfire_grace_time=600)
 schedular.start()
 
