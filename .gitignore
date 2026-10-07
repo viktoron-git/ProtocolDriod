@@ -5,6 +5,7 @@ __pycache__/
 
 #project wid
 .DS_Store
+render_backup_*/
 
 # C extensions
 *.so

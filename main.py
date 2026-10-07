@@ -5,11 +5,11 @@ from time import time
 from datetime import datetime, timezone
 from extensions import app, db, bot, ADMIN_ID
 from models import GroupSetting, Projects, DailyUsage
-from botfunctions import daily_usage_count, increase_daily, decrease_daily, total_claimed, daily_limit, get_msg_details, cleanup_expired_projects, get_total_limit, is_user_admin, set_timer
-
-
-with app.app_context():
-    db.create_all()
+from botfunctions import (daily_usage_count, increase_daily, decrease_daily, total_claimed, daily_limit, get_msg_details, cleanup_expired_projects,
+                          get_total_limit, is_user_admin, set_timer, delete_link)
+from url_utils import normalize_url
+from botfunctions import (resolve_public_chat_id, equivalent_urls, add_alias, remove_aliases, reports_by_each_user, display_name, send_long_message, reports_per_user, reports_today,
+                          daily_stats_text, post_daily_stats, TIMEZONE, duplicate_reply_text, build_export_csv, backfill_normalized_urls)
 
 
 # Inline keyboard buttons
@@ -77,25 +77,11 @@ def unclaim_group(message):
     args = message.text.split()
 
     if len(args) < 2:
-        bot.reply_to(message, '⚠️ Usage: /unclaim <link>')
+        bot.reply_to(message, "What group link do you want to unclaim? ")
+        bot.register_next_step_handler(message, delete_link)
         return
 
-    link_to_delete = args[1]
-    with app.app_context():
-        project = db.session.execute(db.select(Projects).filter_by(chat_id = message.chat.id, group_link=link_to_delete)).scalar()
-        if not project:
-            bot.reply_to(message, "⚠️ Couldn't find link in the database" )
-            return
-
-        if project.user_id != message.from_user.id:
-            bot.reply_to(message, '⚠️ Only the person who reported this can unclaim it')
-            return
-        user_info = bot.get_chat(message.from_user.id)
-        group_name = project.group_name
-        db.session.delete(project)
-        db.session.commit()
-        decrease_daily(chat_id=message.chat.id, user_id=message.from_user.id)
-    bot.reply_to(message, f"{user_info.first_name} unclaimed {group_name}")
+    delete_link(message, args[1])
 
 @bot.message_handler(commands=['setlimit'])
 def set_limit(message):
@@ -186,6 +172,174 @@ def remove_group_limits(message):
     bot.reply_to(message, 'All group limits removed. ')
 
 
+@bot.message_handler(commands=['showlinks'])
+def user_reports(message):
+    if message.chat.type not in ['group', 'supergroup']:
+        bot.send_message(message.chat.id, 'This command only works in groups.')
+        return
+
+    if not is_user_admin(message.chat.id, message.from_user.id):
+        bot.send_message(message.chat.id, 'Only group admins can do this.')
+        return
+
+    args = message.text.split()
+
+    # way 1: the admin replied to a message from the person
+    if message.reply_to_message and message.reply_to_message.from_user:
+        target_id = message.reply_to_message.from_user.id
+    # way 2: the admin typed their user id
+    elif len(args) == 2 and args[1].isdigit():
+        target_id = int(args[1])
+    else:
+        bot.reply_to(message, '⚠️ Usage: /userreports <user id>, or reply to the person\'s message with /showlinks')
+        return
+
+    reports = reports_by_each_user(message.chat.id, target_id)
+    name = display_name(target_id).removeprefix('@')   # no @ so the bot doesn't ping them
+
+    if not reports:
+        bot.reply_to(message, f'No saved reports from {name} in this group.')
+        return
+
+    lines = [f'📋 Groups reported by {name} ({len(reports)}):', '']
+    for i, (group_name, group_link, submitted_at) in enumerate(reports, start=1):
+        lines.append(f'{i}. {group_name} — {group_link} ({submitted_at.strftime("%d %b %Y")})')
+    send_long_message(message, '\n'.join(lines))
+
+
+@bot.message_handler(commands=['stats'])
+def group_stats(message):
+    if message.chat.type not in ['group', 'supergroup']:
+        bot.send_message(message.chat.id, 'This command only works in groups.')
+        return
+
+    if not is_user_admin(message.chat.id, message.from_user.id):
+        bot.send_message(message.chat.id, 'Only group admins can do this.')
+        return
+
+    counts = reports_per_user(message.chat.id)
+    if not counts:
+        bot.reply_to(message, 'No links have been reported in this group yet.')
+        return
+
+    total = sum(t for _, t in counts)
+    top_user, top_total = counts[0]
+    bot.reply_to(message,
+                 f'📈 Group stats\n\n'
+                 f'Reported links: {total}\n'
+                 f'People who reported: {len(counts)}\n'
+                 f'Top reporter: {display_name(top_user).removeprefix("@")} ({top_total})')
+
+
+@bot.message_handler(commands=['dailystats'])
+def group_daily_stats(message):
+    if message.chat.type not in ['group', 'supergroup']:
+        bot.send_message(message.chat.id, 'This command only works in groups.')
+        return
+
+    if not is_user_admin(message.chat.id, message.from_user.id):
+        bot.send_message(message.chat.id, 'Only group admins can do this.')
+        return
+
+    text, _ = daily_stats_text(message.chat.id)
+    send_long_message(message, text)
+
+
+
+@bot.message_handler(commands=['show'])
+def show_links(message):
+    if message.chat.type not in ['group', 'supergroup']:
+        bot.send_message(message.chat.id, 'This command only works in groups.')
+        return
+
+    with app.app_context():
+        projects = db.session.execute(db.select(Projects).filter_by(chat_id=message.chat.id, user_id=message.from_user.id)).scalars().all()
+
+    if not projects:
+        bot.reply_to(message, "You haven't reported any links in this group yet")
+        return
+
+    lines = [f"{i}. {r.group_name} — {r.group_link}" for i, r in enumerate(projects, start=1)]
+    text = "📋 Your reported links:\n\n" + "\n".join(lines)
+    bot.reply_to(message, text)
+
+
+# export csv file
+@bot.message_handler(commands=['export'])
+def export_reports(message):
+    if message.chat.type not in ['group', 'supergroup']:
+        bot.send_message(message.chat.id, 'This command only works in groups.')
+        return
+
+    if not is_user_admin(message.chat.id, message.from_user.id):
+        bot.send_message(message.chat.id, 'Only group admins can do this.')
+        return
+
+    file, total = build_export_csv(message.chat.id)
+    if total == 0:
+        bot.reply_to(message, 'No links have been reported in this group yet.')
+        return
+
+    try:
+        bot.send_document(message.from_user.id, file, caption=f'{total} reports from {message.chat.title}')
+    except ApiTelegramException:
+        bot.reply_to(message, "⚠️ I couldn't message you privately. Open a chat with me, press Start, then try /export again.")
+        return
+    bot.reply_to(message, '📥 Sent the export to your private chat.')
+
+
+@bot.message_handler(commands=['alias'])
+def alias_links(message):
+    if message.chat.type not in ['group', 'supergroup']:
+        bot.send_message(message.chat.id, 'This command only works in groups.')
+        return
+
+    if not is_user_admin(message.chat.id, message.from_user.id):
+        bot.send_message(message.chat.id, 'Only group admins can do this.')
+        return
+
+    args = message.text.split()
+
+    if len(args) != 3:
+        bot.reply_to(message, '⚠️ Usage: /alias <link> <another link to the same group>')
+        return
+
+    first, second = normalize_url(args[1]), normalize_url(args[2])
+    if not first or not second:
+        bot.reply_to(message, '⚠️ One of those links is not valid.')
+        return
+
+    if first == second:
+        bot.reply_to(message, 'Those two links are already the same.')
+        return
+
+    add_alias(message.chat.id, first, second)
+    bot.reply_to(message, '🔗 Done. These two links now count as the same group.')
+
+
+@bot.message_handler(commands=['unalias'])
+def unalias_link(message):
+    if message.chat.type not in ['group', 'supergroup']:
+        bot.send_message(message.chat.id, 'This command only works in groups.')
+        return
+
+    if not is_user_admin(message.chat.id, message.from_user.id):
+        bot.send_message(message.chat.id, 'Only group admins can do this.')
+        return
+
+    args = message.text.split()
+    if len(args) != 2:
+        bot.reply_to(message, '⚠️ Usage: /unalias <link>')
+        return
+
+    normalized = normalize_url(args[1])
+    if not normalized:
+        bot.reply_to(message, '⚠️ That link is not valid.')
+        return
+
+    removed = remove_aliases(message.chat.id, normalized)
+    bot.reply_to(message, f'Removed {removed} pairing(s) for that link.')
+
 # @bot.message_handler(commands=['clear'])
 # def clear(message):
 #     bot.send_message(message.chat.id, 'Keyboard removed', reply_markup=ReplyKeyboardRemove())
@@ -221,13 +375,28 @@ def reply_text(message):
             bot.reply_to(message, '⚠️ Please include a name along with the link.')
             return
 
-        existing = db.session.execute(db.select(Projects).filter_by(chat_id = message.chat.id, group_link = g_link)).scalar()
+        existing = None
+        normalized = None
+        target_chat_id = None
+        if g_link:
+            normalized = normalize_url(g_link) or g_link
+            target_chat_id = resolve_public_chat_id(normalized)
+
+            # first try: same cleaned link, or a link an admin paired with it using /alias
+            existing = db.session.execute(
+                db.select(Projects).filter(
+                    Projects.chat_id == message.chat.id,
+                    Projects.normalized_link.in_(equivalent_urls(message.chat.id, normalized))
+                )
+            ).scalar()
+
+            #second try: chat id check
+            if not existing and target_chat_id is not None:
+                existing = db.session.execute(db.select(Projects).filter_by(chat_id = message.chat.id, target_chat_id=target_chat_id)).scalar()
 
         if existing:
             if existing.user_id != message.from_user.id:
-                user_info = bot.get_chat(existing.user_id)
-                display_name = f'@{user_info.username}' if user_info.username else user_info.first_name
-                bot.reply_to(message, text=f'Group already reported by {display_name}')
+                bot.reply_to(message, duplicate_reply_text(existing))
                 return
             else:
                 existing.group_name = name
@@ -240,7 +409,7 @@ def reply_text(message):
 
             if limit_per_day is not None:
                 if daily_usage_count(chat_id=message.chat.id, user_id=message.from_user.id) >= limit_per_day:
-                    bot.reply_to(message, f"⚠️ You've reached your daily limit. Try again tomorrow or unclaim your previous links.")
+                   # bot.reply_to(message, f"⚠️ You've reached your daily limit. Try again tomorrow or unclaim your previous links.")
                     if ADMIN_ID:
                         display_name = f"@{message.from_user.username}" if message.from_user.username else message.from_user.first_name
                         try:
@@ -262,18 +431,21 @@ def reply_text(message):
                             pass
                     return
 
-            new_project = Projects(user_id=message.from_user.id, chat_id=message.chat.id, group_name=name, group_link=g_link)
+            new_project = Projects(user_id=message.from_user.id, chat_id=message.chat.id, group_name=name,
+                                   group_link=g_link, normalized_link=normalized, target_chat_id=target_chat_id)
+
             db.session.add(new_project)
             db.session.commit()
             increase_daily(chat_id=message.chat.id, user_id=message.from_user.id)
 
 
-
+backfill_normalized_urls()
 schedular = BackgroundScheduler()
 schedular.add_job(cleanup_expired_projects, 'interval', hours=24)
+schedular.add_job(post_daily_stats, 'cron', hour=23, minute=59, timezone=TIMEZONE, misfire_grace_time=600)
 schedular.start()
 
 
-bot.polling()
+bot.infinity_polling(timeout=20, long_polling_timeout=20)
 
 

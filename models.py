@@ -10,6 +10,8 @@ class Projects(db.Model):
     chat_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
     group_name: Mapped[str] = mapped_column(String)
     group_link: Mapped[str] = mapped_column(String)
+    normalized_link: Mapped[str] = mapped_column(String, nullable=True)
+    target_chat_id: Mapped[int] = mapped_column(BigInteger, nullable=True)
     submitted_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc))
 
 class GroupSetting(db.Model):
@@ -25,3 +27,10 @@ class DailyUsage(db.Model):
     chat_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
     date: Mapped[datetime] = mapped_column(Date, nullable=False)
     count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+
+#pairs of links an admin points to same group
+class LinkAlias(db.Model):
+    id: Mapped[int] = mapped_column(primary_key=True)
+    chat_id: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    url_a: Mapped[str] = mapped_column(String, nullable=False)
+    url_b: Mapped[str] = mapped_column(String, nullable=False)
